@@ -1,0 +1,9 @@
+services:
+  - type: worker
+    name: yt-telegram-bot
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false  # set this manually in the Render dashboard, never commit it
