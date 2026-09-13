@@ -1,3 +1,30 @@
+"""
+Telegram bot that downloads YouTube videos using yt-dlp.
+
+Setup:
+1. Create a bot with @BotFather on Telegram, get your bot token.
+2. pip install -r requirements.txt
+3. Install ffmpeg (needed for merging video/audio streams):
+     - Ubuntu/Debian: sudo apt install ffmpeg
+     - macOS: brew install ffmpeg
+     - Windows: winget install ffmpeg (or download from ffmpeg.org and add to PATH)
+4. Set your bot token as an environment variable:
+     PowerShell:      $env:TELEGRAM_BOT_TOKEN="your_token_here"
+     cmd:             set TELEGRAM_BOT_TOKEN=your_token_here
+     macOS/Linux:     export TELEGRAM_BOT_TOKEN="your_token_here"
+5. Run: python bot.py
+
+Flow:
+- User sends a YouTube link.
+- Bot replies with "Video" / "Audio" buttons.
+- If "Video" is chosen, bot replies with quality buttons (360p/480p/720p/1080p/Best).
+- Bot downloads the chosen format and sends it back.
+
+Note: Telegram bots can only send files up to 50MB via the standard Bot API
+(2GB if you self-host a Local Bot API Server). Actual file size is checked
+after download, and the user is warned if it's too large to send.
+"""
+
 import logging
 import os
 import re
@@ -83,13 +110,16 @@ def find_youtube_url(text: str) -> str | None:
     return match.group(0) if match else None
 
 
-def download_video(
-    url: str, out_dir: str, audio_only: bool = False, format_selector: str | None = None
-) -> str:
-    """Downloads a video (or audio) and returns the path to the resulting file."""
+# Optional: path to a cookies.txt file (Netscape format) exported from a
+# logged-in YouTube session. Set the YTDLP_COOKIES_FILE env var to enable.
+# Using personal account cookies for a bot carries some risk to that account
+# if used heavily -- only add this if the Android-client fallback isn't enough.
+COOKIES_FILE = os.environ.get("YTDLP_COOKIES_FILE")
 
+
+def _base_ydl_opts(out_dir: str, audio_only: bool, format_selector: str | None) -> dict:
     if audio_only:
-        ydl_opts = {
+        opts = {
             "format": "bestaudio/best",
             "outtmpl": os.path.join(out_dir, "%(title)s.%(ext)s"),
             "postprocessors": [
@@ -103,7 +133,7 @@ def download_video(
             "quiet": True,
         }
     else:
-        ydl_opts = {
+        opts = {
             "format": format_selector or QUALITY_FORMATS["best"],
             "outtmpl": os.path.join(out_dir, "%(title)s.%(ext)s"),
             "merge_output_format": "mp4",
@@ -111,8 +141,38 @@ def download_video(
             "quiet": True,
         }
 
+    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+        opts["cookiefile"] = COOKIES_FILE
+
+    return opts
+
+
+def download_video(
+    url: str, out_dir: str, audio_only: bool = False, format_selector: str | None = None
+) -> str:
+    """Downloads a video (or audio) and returns the path to the resulting file.
+
+    Cloud hosting IPs (Railway, Render, AWS, etc.) are often flagged by
+    YouTube's bot-detection, which normally only appears when downloading
+    from a browser-like client. As a first line of defense, we retry with
+    the Android app's client identity, which frequently bypasses this.
+    """
+    ydl_opts = _base_ydl_opts(out_dir, audio_only, format_selector)
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+    except yt_dlp.utils.DownloadError as e:
+        if "sign in" in str(e).lower() or "not a bot" in str(e).lower():
+            logger.warning("Bot check triggered, retrying with Android client...")
+            retry_opts = dict(ydl_opts)
+            retry_opts["extractor_args"] = {"youtube": {"player_client": ["android"]}}
+            with yt_dlp.YoutubeDL(retry_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+        else:
+            raise
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
         filepath = ydl.prepare_filename(info)
         if audio_only:
             # extension gets rewritten to mp3 by the postprocessor
